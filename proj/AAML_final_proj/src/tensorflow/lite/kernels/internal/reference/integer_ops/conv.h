@@ -76,18 +76,18 @@ inline void ConvPerChannel(
   const int im2col_row = output_height*output_width;
   const int im2col_col = filter_input_depth*filter_height*filter_width;
 
-  
-  int8_t im2col[576][1024];
-  int8_t kernel[576][64];
+
+  int8_t im2col[576][4];
 
   int row_ = im2col_row/4;
   int ch_ = output_depth/4;
 
 
 // ////////////////////////////////////-- im2col --/////////////////////////////////////////////
- 
-  cfu_op0(1,input_offset,im2col_col);
 
+  cfu_op0(1,input_offset,im2col_col);
+  int image_cnt = 0;
+  int mm = 0;
   for (int out_y = 0; out_y < output_height; ++out_y) {
     const int in_y_origin = (out_y * stride_height) - pad_height;
     for (int out_x = 0; out_x < output_width; ++out_x) {
@@ -100,60 +100,84 @@ inline void ConvPerChannel(
             const bool is_point_inside_image =
               (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
               (in_y < input_height);
-            if (!is_point_inside_image) {
-            
-              im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][out_y*output_width + out_x] = -input_offset;
+            if (!is_point_inside_image) [[unlikely]] {
+
+              // im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][out_y*output_width + out_x] = -input_offset;
+              im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][image_cnt] = -input_offset;
               // continue;
             }
             else{
-              im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][out_y*output_width + out_x]
-                = input_data[Offset(input_shape, 0, in_y, in_x,
-                                      in_channel + 0 * filter_input_depth)];
+              // im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][out_y*output_width + out_x]
+              //   = input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
+              im2col[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][image_cnt]
+                = input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
 
             }
           }
         }
       }
-    }  
-  }
-  
-  for(int m=0; m<row_ ;m++){
-    for(int k=0;k<im2col_col;k++){
-      int temp1 = k*1024+m*4;
-      int32_t b = *(uint32_t*)(*im2col+temp1);
-      cfu_op5(1,b,k+(m*im2col_col));
+      image_cnt++;
+      if(image_cnt == 4) {
+        for(int k=0;k<im2col_col;k++){
+          int32_t b = *(uint32_t*)(*im2col+k*4);
+          cfu_op5(1, b, k+(mm*im2col_col));
+        }
+        image_cnt = 0;
+        mm++;
+      }
     }
   }
 
-  
- 
+  if(image_cnt != 0) {
+    for(int k=0;k<im2col_col;k++){
+      int32_t b = *(uint32_t*)(*im2col+k*4);
+      cfu_op5(1, b, k+(mm*im2col_col));
+    }
+    // image_cnt = 0;
+    // mm++;
+  }
+
+
   ////////////////////////////////////-- kernel --/////////////////////////////////////////////
-  
-  for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-    for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-      
-      for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-        for (int in_channel = 0; in_channel < filter_input_depth; ++in_channel) {
-         
-          kernel[filter_y*filter_width*filter_input_depth + filter_x*filter_input_depth + in_channel][out_channel]
-            = filter_data[Offset(filter_shape, out_channel, filter_y, filter_x, in_channel)];
+
+  int filter_depth_offset = 0;
+  int8_t kernel_value[4] = {0};
+  int num_cnt = 0;
+  for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+    for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+      for (int in_channel = 0; in_channel < filter_input_depth; ++in_channel) {
+        int n = 0;
+        for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
+          kernel_value[num_cnt++] = filter_data[Offset(filter_shape, out_channel, filter_y, filter_x, in_channel)];
+          if(num_cnt == 4) {
+            int32_t b = *(uint32_t*)(kernel_value);
+            cfu_op6(1, b, filter_depth_offset+(n*im2col_col));
+            kernel_value[0] = 0;
+            kernel_value[1] = 0;
+            kernel_value[2] = 0;
+            kernel_value[3] = 0;
+            n++;
+            num_cnt = 0;
+          }
         }
+        if(num_cnt != 0) {
+          int32_t b = *(uint32_t*)(kernel_value);
+          cfu_op6(1, b, filter_depth_offset+(n*im2col_col));
+          kernel_value[0] = 0;
+          kernel_value[1] = 0;
+          kernel_value[2] = 0;
+          kernel_value[3] = 0;
+          n++;
+          num_cnt = 0;
+        }
+        filter_depth_offset ++;
       }
     }
   }
 
 
-  for(int n=0; n<ch_ ;n++){
-    for(int k=0;k<im2col_col;k++){
-      int temp1 = k*64+n*4;
-      int32_t b = *(uint32_t*)(*kernel+temp1);
-      cfu_op6(1,b,k+(n*im2col_col));
-      
-    }
-  }
-
   //////////////////////////////////-- output --/////////////////////////////////////////////
- 
+
 
     // if((im2col_row%4) != 0){
     //   for(int m=4*row_ ; m<im2col_row; m++){
@@ -173,7 +197,7 @@ inline void ConvPerChannel(
     //         int out_x = m%output_width;
     //         int out_y = m/output_width;
     //         output_data[Offset(output_shape, 0, out_y, out_x, out_channel)] =
-    //             static_cast<int8_t>(acc); 
+    //             static_cast<int8_t>(acc);
     //     }
     //   }
     // }
@@ -196,7 +220,7 @@ inline void ConvPerChannel(
     //         int out_x = m%output_width;
     //         int out_y = m/output_width;
     //         output_data[Offset(output_shape, 0, out_y, out_x, out_channel)] =
-    //             static_cast<int8_t>(acc); 
+    //             static_cast<int8_t>(acc);
     //     }
     //   }
     // }
@@ -215,23 +239,23 @@ inline void ConvPerChannel(
       // }
 
 
- 
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // int temp = 0;
-    
+
     for(int m=0; m<row_; m++){
       for (int out_channel = 0; out_channel < ch_; out_channel++) {
-       
+
           cfu_op1(1,row_,ch_);
-          
+
         for(int i=0;i<4;i++){
           for(int j=0;j<4;j++){
             // printf("%d %d\n",im2col[0][row_*4-1], kernel[0][ch_*4-1]);
             int32_t acc = cfu_op7(1,0,0);
             // if(m==0 && out_channel==0 && i==0 && j==0) printf("acc  %ld\n",acc);
             int out_ch = out_channel*4+j;
-            
+
             if (bias_data) {
               acc += bias_data[out_ch];
             }
@@ -244,16 +268,16 @@ inline void ConvPerChannel(
             int out_y = (m*4+i)/output_width;
             output_data[Offset(output_shape, 0, out_y, out_x, out_ch)] =
                 static_cast<int8_t>(acc);
-            
+
           }
         }
       }
     }
-    
- 
+
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  
+
 
 
 
