@@ -58,14 +58,18 @@ module Cfu (
     localparam InputOffset = $signed(9'd128);
 
 
-
+// add by ps
+reg flag_a_defer;
+reg [15:0] cnt_A_addr;
+reg [31:0] w_bram_second_one;
 
 reg [15:0]temp_addr;
 reg [31:0]w_bram;
 ////////////////////////////////////-- BRAM A--////////////////////////////////////////////
 reg          A_wr_en;
 reg [15:0]    A_index;
-reg [31:0]    A_data_in;
+// reg [31:0]    A_data_in;
+wire [31:0]    A_data_in;
 wire [31:0]    A_data_out;
 global_buffer_bram #(
     .ADDR_BITS(16), // ADDR_BITS 12 -> generates 2^12 entries
@@ -82,18 +86,32 @@ global_buffer_bram #(
   );
 
 
+// always @(*) begin
+//   if(flag_a) begin   
+//     A_index = temp_addr;
+//     A_data_in = w_bram;
+//     A_wr_en = 1;
+//     // B_index = 0;
+//     // B_data_in = 0;
+//     // B_wr_en = 0;
+//   end
+//   else begin
+//     A_index = img_size;
+//     A_data_in = 0;
+//     A_wr_en = 0;
+//   end
+// end
+
+
+assign A_data_in = (flag_a)? w_bram : w_bram_second_one;
+
 always @(*) begin
-  if(flag_a) begin   
-    A_index = temp_addr;
-    A_data_in = w_bram;
+  if(flag_a || flag_a_defer) begin   
+    A_index = cnt_A_addr;
     A_wr_en = 1;
-    // B_index = 0;
-    // B_data_in = 0;
-    // B_wr_en = 0;
   end
   else begin
     A_index = img_size;
-    A_data_in = 0;
     A_wr_en = 0;
   end
 end
@@ -163,6 +181,29 @@ reg [13:0]ker_size;
     assign cmd_ready = ~rsp_valid;
     integer j,k;
     
+    // flag_a_defer
+    always @(posedge clk) begin
+      if(reset) begin
+        flag_a_defer <= 0;
+      end
+      else begin
+        flag_a_defer <= flag_a;
+      end
+    end
+
+    // cnt_A_addr
+    always @(posedge clk) begin
+      if(reset) begin
+        cnt_A_addr <= 0;
+      end
+      else begin
+        if(cmd_payload_function_id[2:0]==6) cnt_A_addr <= 0;
+        else if(flag_a || flag_a_defer) cnt_A_addr <= cnt_A_addr + 1;
+        
+      end
+    end
+
+
     always @(posedge clk) begin
       if (reset) begin
         rsp_payload_outputs_0 <= 32'b0;
@@ -188,6 +229,8 @@ reg [13:0]ker_size;
         B_temp_3 <= 0;
         B_temp_4 <= 0;
         start_count <= 0;
+
+        w_bram_second_one <= 0;
       end 
 
       else if (rsp_valid) begin
@@ -221,8 +264,9 @@ reg [13:0]ker_size;
         end
         else if(cmd_payload_function_id[2:0]==5)begin
           flag_a <= 1;
-          temp_addr <= cmd_payload_inputs_1;
+          // temp_addr <= cmd_payload_inputs_1;
           w_bram <= cmd_payload_inputs_0;
+          w_bram_second_one <= cmd_payload_inputs_1;
         end
         else if(cmd_payload_function_id[2:0]==6)begin
           flag_b <= 1;
